@@ -1,12 +1,15 @@
 from dataclasses import dataclass, field
 import logging
 from random import seed
+import time
 from typing import Any, cast
 
 import hydra
 from hydra.utils import instantiate
 from hydra.core.config_store import ConfigStore
 from omegaconf import MISSING, OmegaConf
+
+from .ilp.cdp import ILPCDP
 
 from .instances.generate import (
     InstanceGeneratorConfig,
@@ -36,7 +39,9 @@ class MainConfig:
     instance: InstanceGeneratorConfig = field(default_factory=InstanceGeneratorConfig)
     eval: EvaluationConfig = MISSING
     safety_checks: bool = True
+    ilp_check: bool | None = None
     random_seed: int = 42
+    ilp_solve: bool = False
 
 
 OmegaConf.register_new_resolver(
@@ -60,6 +65,12 @@ def my_main(cfg: MainConfig):
 
     log.debug(SL("Running on instance", instance=cfg.instance.path))
     instance = load_or_gen_instance(cfg.instance)
+
+    if cfg.ilp_check is None:
+        # skip ILP check for large topologies to avoid OOM
+        cfg.ilp_check = len(instance.topology.graph.nodes) <= 20
+
+    log.debug(SL("Instance info", instance=instance.to_json()))
     evaluator = cast(Evaluator, instantiate(cfg.eval))
 
     contents = set(req.content_id for req in instance.requests)
@@ -69,6 +80,13 @@ def my_main(cfg: MainConfig):
         for content in contents
     }
     log.debug(SL("Content placement", placement=content_placement))
+
+    ilp: ILPCDP | None = None
+    if cfg.ilp_solve or cfg.ilp_check:
+        ilp = ILPCDP(instance, evaluator)
+    if cfg.ilp_solve:
+        assert ilp is not None
+        _ = ilp.solve()
 
     if cfg.router is not None:
         router = cast(
@@ -80,6 +98,8 @@ def my_main(cfg: MainConfig):
                 _recursive_=False,
             ),
         )
+
+        start = time.time()
         all_routes = router.route_instance(instance, content_placement)
         if cfg.safety_checks:
             for routes, req in zip(all_routes, instance.requests):
@@ -91,6 +111,7 @@ def my_main(cfg: MainConfig):
                 route_formats=[
                     [r.format.name for r in routes] for routes in all_routes
                 ],
+                time=time.time() - start,
             )
         )
 
@@ -115,6 +136,9 @@ def my_main(cfg: MainConfig):
                 score=evaluator.evaluate(conflict_graph.total_fs(), mofi),
             )
         )
+        if cfg.ilp_check:
+            assert ilp is not None
+            ilp.check_solution(all_routes, tuple(start_indices))
 
 
 if __name__ == "__main__":
