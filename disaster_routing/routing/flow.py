@@ -78,7 +78,10 @@ def extract_all_flow_paths(
 
 
 # TODO: add available out nodes constraint
-def reconstruct_min_hop_path(G: Graph, group_path: list[set[int]]) -> ilist[int]:
+def reconstruct_min_hop_path(
+    G: Graph, source: int, avail_outs: list[int], group_path: list[set[int]]
+) -> ilist[int]:
+    group_path = [{source}] + group_path + [group_path[-1].intersection(avail_outs)]
     # group_path: list of sets of nodes (G1, G2, ..., Gk)
     # Returns: (min_path, hop_count)
 
@@ -149,7 +152,11 @@ class FlowRoutingAlgorithm(RoutingAlgorithm):
 
                 if len(dz.nodes.intersection(dst)) > 0:
                     if req.source in dz.nodes:
-                        flow_graph.add_edge(sink_nodes[i], "sink")
+                        flow_graph.add_edge(
+                            sink_nodes[i],
+                            "sink",
+                            capacity=len(dz.nodes.intersection(dst)),
+                        )
                     else:
                         flow_graph.add_edge(sink_nodes[i], "sink", capacity=1)
 
@@ -182,13 +189,28 @@ class FlowRoutingAlgorithm(RoutingAlgorithm):
             try:
                 flow = cast(dict[str, dict[str, int]], nx.min_cost_flow(flow_graph))
                 dz_paths = extract_all_flow_paths(flow_graph, "source", "sink", flow)
-                routes: list[Route] = []
+                dz_set_lists: list[list[set[int]]] = []
                 for dz_path in dz_paths:
                     dz_index_list: list[int] = remove_consecutive_duplicates(
                         remove_nones([extract_dz_index(node) for node in dz_path])
                     )
-                    dz_set_list = [top.dzs[i].nodes for i in dz_index_list]
-                    path = reconstruct_min_hop_path(top.graph, dz_set_list)
+                    dz_set_lists.append([set(top.dzs[i].nodes) for i in dz_index_list])
+                for i in range(len(dz_set_lists)):
+                    for j in range(len(dz_set_lists)):
+                        if i == j:
+                            continue
+                        dz_route_i, dz_route_j = dz_set_lists[i], dz_set_lists[j]
+                        for k in range(0, len(dz_route_i)):
+                            for l in range(1, len(dz_route_j)):
+                                dz_route_i[k].difference_update(dz_route_j[l])
+                routes: list[Route] = []
+                for dz_set_list in dz_set_lists:
+                    path = reconstruct_min_hop_path(
+                        top.graph,
+                        req.source,
+                        dst,
+                        dz_set_list,
+                    )
                     if len(path) == 0:
                         break
                     routes.append(Route(top, path))
